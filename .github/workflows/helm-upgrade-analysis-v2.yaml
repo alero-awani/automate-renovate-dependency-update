@@ -11,7 +11,7 @@ env:
 
 jobs:
   helm-upgrade-analysis:
-    if: github.event_name == 'pull_request' && (contains(github.head_ref, 'renovate/') || contains(github.actor, 'renovate') || github.actor == 'renovate[bot]' || contains(github.event.pull_request.title, 'chore(deps)'))
+    if: github.event_name == 'pull_request' && github.event.action == 'opened' && (contains(github.head_ref, 'renovate/') || contains(github.actor, 'renovate') || github.actor == 'renovate[bot]' || contains(github.event.pull_request.title, 'chore(deps)'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
