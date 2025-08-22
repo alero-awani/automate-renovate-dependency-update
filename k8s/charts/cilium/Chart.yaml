@@ -6,5 +6,5 @@ maintainers:
     email: samuel.arogbonlo@p2p.org
 dependencies:
   - name: cilium
-    version: "1.18.0"
+    version: "1.18.1"
     repository: "https://helm.cilium.io/"
