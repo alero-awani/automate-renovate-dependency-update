@@ -1,11 +1,8 @@
 #!/bin/bash
 
-# Helm Chart Upgrade Analysis Functions
-# Common functions for helm chart upgrade analysis workflow
-
 set -euo pipefail
 
-# Global variables
+# Global state variables
 declare -g CHART_NAME=""
 declare -g DEPENDENCY_NAME=""
 declare -g OLD_VERSION=""
@@ -13,12 +10,8 @@ declare -g NEW_VERSION=""
 declare -g CHART_ARCHIVE=""
 declare -g WORKING_DIR=""
 
-# Label management
 declare -a ANALYSIS_LABELS=("breaking-changes" "ready-to-merge" "needs-review")
 
-# =============================================================================
-# Utility Functions
-# =============================================================================
 
 log_info() {
     echo "INFO: $*"
@@ -43,14 +36,12 @@ get_error_message_for_status() {
     esac
 }
 
-# Remove all analysis labels to avoid conflicts
 remove_analysis_labels() {
     for label in "${ANALYSIS_LABELS[@]}"; do
         gh pr edit --remove-label "$label" 2>/dev/null || true
     done
 }
 
-# Apply a label with description and color
 apply_label() {
     local label="$1"
     local description="$2"
@@ -62,11 +53,6 @@ apply_label() {
 }
 
 
-# =============================================================================
-# Chart Detection and Setup
-# =============================================================================
-
-# Helper function to set up context from step outputs
 setup_context_from_outputs() {
     local chart_name="$1"
     local dependency_name="$2"
@@ -85,7 +71,6 @@ setup_context_from_outputs() {
         NEW_VERSION="$new_version"
     fi
     
-    # Ensure working directory and subdirectories exist
     if [[ -d "$WORKING_DIR" ]]; then
         cd "$WORKING_DIR"
         mkdir -p {new_templates,diff_outputs}
@@ -121,16 +106,9 @@ detect_changed_chart() {
 setup_workspace() {
     WORKING_DIR="k8s/charts/$CHART_NAME"
     cd "$WORKING_DIR"
-    
-    # Create necessary directories
     mkdir -p {new_templates,diff_outputs}
-    
     log_info "Workspace set up in: $WORKING_DIR"
 }
-
-# =============================================================================
-# Dependency Version Detection
-# =============================================================================
 
 extract_dependency_versions() {
     local base_sha="$1"
@@ -142,10 +120,8 @@ extract_dependency_versions() {
     
     log_info "Extracting dependency versions from git diff..."
     
-    # Get old and new Chart.yaml content
+    # Get Chart.yaml from base commit to compare versions
     git show "${base_sha}:k8s/charts/$CHART_NAME/Chart.yaml" > old_chart.yaml
-    
-    # Find which dependency version changed
     while IFS= read -r dep; do
         local old_ver new_ver
         old_ver=$(yq eval ".dependencies[] | select(.name == \"$dep\") | .version" old_chart.yaml 2>/dev/null || echo "")
@@ -165,19 +141,14 @@ extract_dependency_versions() {
         fi
     done < <(yq eval '.dependencies[].name' Chart.yaml)
     
-    # No changes detected - this shouldn't happen with Renovate
     log_error "No dependency version changes detected in Chart.yaml"
     exit 1
 }
 
-# =============================================================================
-# Chart Extraction
-# =============================================================================
 
 extract_new_chart_from_archive() {
     log_info "Extracting new chart from archive..."
     
-    # Navigate to charts directory and find archive
     cd "./charts" || {
         log_error "Charts directory not found"
         exit 1
@@ -186,7 +157,7 @@ extract_new_chart_from_archive() {
     local chart_archive
     chart_archive=$(ls "${DEPENDENCY_NAME}"-*.tgz 2>/dev/null | head -1)
     
-    # Fallback: try with chart directory name
+    # Fallback: chart archive might use parent chart name instead of dependency name
     if [[ -z "$chart_archive" ]]; then
         log_info "Archive not found with dependency name, trying chart directory name..."
         chart_archive=$(ls "${CHART_NAME}"-*.tgz 2>/dev/null | head -1)
@@ -201,7 +172,6 @@ extract_new_chart_from_archive() {
     log_info "Found chart archive: $CHART_ARCHIVE"
     echo "chart_archive=$CHART_ARCHIVE" >> "$GITHUB_OUTPUT"
     
-    # Extract chart archive and get default values
     tar -xzf "$CHART_ARCHIVE"
     
     if [[ -f "${DEPENDENCY_NAME}/values.yaml" ]]; then
@@ -212,19 +182,15 @@ extract_new_chart_from_archive() {
         exit 1
     fi
     
-    # Return to working directory (parent of charts/)
     cd ".."
 }
 
 get_old_chart_values() {
     log_info "Getting old chart values for version: $OLD_VERSION"
     
-    # Get repository URL from current Chart.yaml
     local repository
     repository=$(yq eval ".dependencies[] | select(.name == \"$DEPENDENCY_NAME\") | .repository" Chart.yaml)
     log_info "Chart repository: $repository"
-    
-    # Get old chart values based on repository type
     if [[ "$repository" == oci://* ]]; then
         log_info "Getting values from OCI repository: $repository"
         if helm show values "$repository/$DEPENDENCY_NAME" --version "$OLD_VERSION" > old_chart_values.yaml; then
@@ -249,9 +215,6 @@ get_old_chart_values() {
     fi
 }
 
-# =============================================================================
-# Chart Templating
-# =============================================================================
 
 template_chart_with_values() {
     local chart_path="$1"
@@ -276,21 +239,15 @@ template_chart_with_values() {
         log_info "Templating chart with $values_file..."
         
         local output_file="${output_dir}/${prefix}-${values_name}.yaml"
-        
-        # Template and validate the chart
         local helm_validation_file="${output_dir}/${prefix}-${values_name}-helm-validation.txt"
-        
-        # Step 1: Helm template with validation
+        # Template with validation - stderr goes to validation file for AI analysis
         if helm template "$release_name" "$chart_path" -f "$values_file" --validate --dry-run=server > "$output_file" 2> "$helm_validation_file"; then
             log_info "Helm template validation passed for $values_file"
-            
             log_info "Successfully templated chart with $values_file"
         else
             log_error "Helm template validation failed for $values_file"
         fi
         
-        
-        # Show validation error results
         log_info "Helm template results for $values_file:"
         echo "--- START VALIDATION OUTPUT ---"
         if [[ -s "$helm_validation_file" ]]; then
@@ -302,25 +259,12 @@ template_chart_with_values() {
     done
 }
 
-template_new_charts() {
-    template_chart_with_values "./charts/$DEPENDENCY_NAME" "new-release" "new_templates" "new-template"
-}
 
-# Old chart templating removed - only need values.yaml for comparison
-
-# =============================================================================
-# Comparison Functions
-# =============================================================================
-
-# Template manifest comparison removed - focusing on chart defaults and validation only
 
 compare_chart_default_values() {
     log_info "Comparing chart default values..."
     
-    # Compare old chart defaults with new chart defaults
     dyff between old_chart_values.yaml chart_default_values.yaml --color=off > diff_outputs/chart_diff.txt || true
-    
-    # Check if differences exist
     local chart_has_diff
     chart_has_diff=$([[ -s diff_outputs/chart_diff.txt ]] && echo "true" || echo "false")
     echo "chart_has_diff=$chart_has_diff" >> "$GITHUB_OUTPUT"
@@ -328,13 +272,7 @@ compare_chart_default_values() {
     log_info "Chart default values comparison completed"
 }
 
-# =============================================================================
-# Early Exit Conditions
-# =============================================================================
-
-
 check_early_exit_conditions() {
-    # Check if no changes detected - early exit for safe merges
     if [[ ! -s diff_outputs/chart_diff.txt ]]; then
         log_info "No chart default differences detected - this is a safe version bump"
         
@@ -351,16 +289,11 @@ check_early_exit_conditions() {
     echo "skip_ai=false" >> "$GITHUB_OUTPUT"
 }
 
-# =============================================================================
-# AI Analysis
-# =============================================================================
-
 apply_ai_fallback_label() {
     local reason="$1"
-    
-    # Fallback logic: Check helm validation files directly (same as PR comment logic)
     local helm_validation_failed=false
     
+    # Check if any helm validation files contain errors
     for validation_file in new_templates/*-helm-validation.txt; do
         if [[ -f "$validation_file" ]] && [[ -s "$validation_file" ]]; then
             helm_validation_failed=true
@@ -372,9 +305,6 @@ apply_ai_fallback_label() {
         log_info "AI unavailable but helm template validation passed - applying ready-to-merge label"
         remove_analysis_labels
         apply_label "ready-to-merge" "Helm validation passed - safe to merge" "0e8a16"
-        
-        # Create AI analysis file indicating fallback was used, but don't create error summary
-        # This allows the workflow to continue and generate the full report
         echo "AI analysis unavailable - falling back to helm template validation results. Helm validation passed successfully." > ai_analysis.md
     else
         log_info "AI unavailable and helm template failures detected - requires manual review"
@@ -387,8 +317,6 @@ apply_ai_fallback_label() {
 
 build_ai_prompt() {
     log_info "Building AI prompt..."
-    
-    # Collect validation errors from new template validation files
     local validation_errors=""
     local values_files
     mapfile -t values_files < <(ls values.*.yaml 2>/dev/null || true)
@@ -422,7 +350,6 @@ Only focus on configurations related to '$DEPENDENCY_NAME' - ignore any other de
 \`\`\`
 EOF
     
-    # Add chart diff content
     if [[ -s "diff_outputs/chart_diff.txt" ]]; then
         cat diff_outputs/chart_diff.txt >> full_prompt.txt
     else
@@ -534,7 +461,7 @@ add_values_files_to_prompt() {
             echo "$counter. CUSTOM VALUES FILE ($values_file)$([ "$has_dependency" = "true" ] && echo " - $DEPENDENCY_NAME section" || echo ""):" >> full_prompt.txt
             echo '```yaml' >> full_prompt.txt
             
-            if [[ "$has_dependency" = "true" ]]; then
+                    if [[ "$has_dependency" = "true" ]]; then
                 echo "# Only showing $DEPENDENCY_NAME related configurations:" >> full_prompt.txt
                 yq eval ".$DEPENDENCY_NAME" "$values_file" >> full_prompt.txt 2>/dev/null || echo "# No $DEPENDENCY_NAME section found" >> full_prompt.txt
             else
@@ -556,7 +483,7 @@ add_values_files_to_prompt() {
 call_ai_api() {
     log_info "Calling AI API..."
     
-    # Create JSON payload
+    # Create JSON payload template
     cat > ai_payload.json << 'EOF'
 {
   "model": "openai/gpt-4o",
@@ -569,10 +496,8 @@ call_ai_api() {
 }
 EOF
     
-    # Insert prompt content safely
+    # Insert prompt content safely using jq
     jq --rawfile content full_prompt.txt '.messages[0].content = $content' ai_payload.json > final_payload.json
-    
-    # Call API with retry logic
     local max_retries=3
     local retry_count=0
     local success=false
@@ -631,6 +556,7 @@ apply_ai_label() {
     
     remove_analysis_labels
     
+    # Parse AI response to extract label recommendation
     if echo "$ai_analysis" | grep -qi "LABEL.*breaking-changes\|Label.*breaking-changes"; then
         log_info "AI detected breaking changes!"
         echo "breaking_changes=true" >> "$GITHUB_OUTPUT"
@@ -648,14 +574,11 @@ apply_ai_label() {
 
 process_ai_response() {
     if [[ -f ai_response.json && -s ai_response.json ]]; then
-        # Check if we got a proper response
         if jq -e '.choices[0].message.content' ai_response.json > /dev/null 2>&1; then
             local ai_analysis
             ai_analysis=$(jq -r '.choices[0].message.content' ai_response.json)
             echo "$ai_analysis" > ai_analysis.md
             log_info "AI analysis completed successfully"
-            
-            # Extract and apply label from AI response
             apply_ai_label "$ai_analysis"
         else
             log_error "AI response format invalid"
@@ -678,9 +601,6 @@ perform_ai_analysis() {
     fi
 }
 
-# =============================================================================
-# Summary Generation
-# =============================================================================
 
 create_failure_summary() {
     local title="$1"
@@ -836,22 +756,12 @@ post_pr_comment() {
     gh pr comment "$pr_number" --body-file diff_summary.md
 }
 
-# =============================================================================
-# Cleanup
-# =============================================================================
-
 cleanup_workspace() {
     log_info "Cleaning up workspace..."
-    # Add any cleanup operations here if needed
 }
 
-# =============================================================================
-# Export functions for use in workflow
-# =============================================================================
-
-# This allows the workflow to source this file and use all functions
+#this script should be sourced by workflows
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    # Script is being executed directly, not sourced
     log_error "This script should be sourced, not executed directly"
     exit 1
 fi

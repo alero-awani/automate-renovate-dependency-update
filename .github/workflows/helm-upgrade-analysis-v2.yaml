@@ -73,7 +73,7 @@ jobs:
         run: |
           source .github/scripts/helm-analysis-functions.sh
           setup_context_from_outputs "${{ steps.init.outputs.chart_name }}" "${{ steps.extract-versions.outputs.dependency_name }}" "${{ steps.extract-versions.outputs.old_version }}" "${{ steps.extract-versions.outputs.new_version }}"
-          template_new_charts
+          template_chart_with_values "./charts/${{ steps.extract-versions.outputs.dependency_name }}" "new-release" "new_templates" "new-template"
 
       - name: Compare chart defaults
         id: compare-defaults
