@@ -483,6 +483,10 @@ add_values_files_to_prompt() {
 call_ai_api() {
     log_info "Calling AI API..."
     
+    # TESTING: Simulate API failure
+    log_error "Simulating API failure for testing"
+    return 1
+    
     # Create JSON payload template
     cat > ai_payload.json << 'EOF'
 {
