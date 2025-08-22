@@ -216,47 +216,36 @@ extract_new_chart_from_archive() {
     cd ".."
 }
 
-download_old_chart() {
-    log_info "Downloading old chart version: $OLD_VERSION"
+get_old_chart_values() {
+    log_info "Getting old chart values for version: $OLD_VERSION"
     
     # Get repository URL from current Chart.yaml
     local repository
     repository=$(yq eval ".dependencies[] | select(.name == \"$DEPENDENCY_NAME\") | .repository" Chart.yaml)
     log_info "Chart repository: $repository"
     
-    # Download old chart based on repository type
+    # Get old chart values based on repository type
     if [[ "$repository" == oci://* ]]; then
-        log_info "Downloading from OCI repository: $repository"
-        if helm pull "$repository/$DEPENDENCY_NAME" --version "$OLD_VERSION" --untar; then
-            log_info "Successfully downloaded old chart from OCI repository"
+        log_info "Getting values from OCI repository: $repository"
+        if helm show values "$repository/$DEPENDENCY_NAME" --version "$OLD_VERSION" > old_chart_values.yaml; then
+            log_info "Successfully retrieved old chart values from OCI repository"
+            return 0
         else
-            log_error "Failed to download old chart from OCI repository"
+            log_error "Failed to get old chart values from OCI repository"
             return 1
         fi
     else
-        log_info "Downloading from Helm repository: $repository"
+        log_info "Getting values from Helm repository: $repository"
         if helm repo add temp-old-repo "$repository" && \
-           helm pull "temp-old-repo/$DEPENDENCY_NAME" --version "$OLD_VERSION" --untar; then
+           helm show values "temp-old-repo/$DEPENDENCY_NAME" --version "$OLD_VERSION" > old_chart_values.yaml; then
             helm repo remove temp-old-repo 2>/dev/null || true
-            log_info "Successfully downloaded old chart from Helm repository"
+            log_info "Successfully retrieved old chart values from Helm repository"
+            return 0
         else
             helm repo remove temp-old-repo 2>/dev/null || true
-            log_error "Failed to download old chart from Helm repository"
+            log_error "Failed to get old chart values from Helm repository"
             return 1
         fi
-    fi
-    
-    # Extract old values.yaml and cleanup
-    if [[ -f "${DEPENDENCY_NAME}/values.yaml" ]]; then
-        cp "${DEPENDENCY_NAME}/values.yaml" "old_chart_values.yaml"
-        log_info "Extracted old chart values from $DEPENDENCY_NAME"
-        # Cleanup extracted old chart directory since we only need values.yaml
-        rm -rf "$DEPENDENCY_NAME"
-        return 0
-    else
-        log_error "No values.yaml found in downloaded $DEPENDENCY_NAME chart"
-        rm -rf "$DEPENDENCY_NAME" 2>/dev/null || true
-        return 1
     fi
 }
 

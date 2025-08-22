@@ -66,7 +66,7 @@ jobs:
           source .github/scripts/helm-analysis-functions.sh
           setup_context_from_outputs "${{ steps.init.outputs.chart_name }}" "${{ steps.extract-versions.outputs.dependency_name }}" "${{ steps.extract-versions.outputs.old_version }}" "${{ steps.extract-versions.outputs.new_version }}"
           extract_new_chart_from_archive
-          download_old_chart
+          get_old_chart_values
 
       - name: Template new charts with values
         id: template-charts
