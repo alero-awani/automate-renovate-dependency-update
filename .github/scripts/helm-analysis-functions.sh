@@ -786,19 +786,19 @@ add_validation_results_to_summary() {
         
         echo "#### $values_file - Validation Results" >> diff_summary.md
         echo "" >> diff_summary.md
-        echo "**Helm Template Validation:**" >> diff_summary.md
-        echo "" >> diff_summary.md
-        echo '```' >> diff_summary.md
         
         local new_helm_validation="new_templates/new-template-${values_name}-helm-validation.txt"
         if [[ -s "$new_helm_validation" ]]; then
+            echo "**❌ Helm Template Validation Failed:**" >> diff_summary.md
+            echo "" >> diff_summary.md
+            echo '```' >> diff_summary.md
             cat "$new_helm_validation" >> diff_summary.md
+            echo '```' >> diff_summary.md
             validation_passed=false
         else
-            echo "✅ Helm template validation passed" >> diff_summary.md
+            echo "**✅ Helm Template Validation Passed**" >> diff_summary.md
         fi
         
-        echo '```' >> diff_summary.md
         echo "" >> diff_summary.md
     done
     
