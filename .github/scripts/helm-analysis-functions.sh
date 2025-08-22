@@ -240,13 +240,8 @@ template_chart_with_values() {
         
         local output_file="${output_dir}/${prefix}-${values_name}.yaml"
         local helm_validation_file="${output_dir}/${prefix}-${values_name}-helm-validation.txt"
-        # TESTING: Simulate template validation errors
-        echo "Error: pods 'cilium-agent' is forbidden: User cannot create resource 'pods' in API group" > "$helm_validation_file"
-        echo "Error: serviceaccounts 'cilium' is forbidden: User cannot create resource 'serviceaccounts'" >> "$helm_validation_file"
-        echo "Error: configmaps 'cilium-config' already exists" >> "$helm_validation_file"
-        
         # Template with validation - stderr goes to validation file for AI analysis
-        if false; then  # Force failure for testing
+        if helm template "$release_name" "$chart_path" -f "$values_file" --validate --dry-run=server > "$output_file" 2> "$helm_validation_file"; then
             log_info "Helm template validation passed for $values_file"
             log_info "Successfully templated chart with $values_file"
         else
