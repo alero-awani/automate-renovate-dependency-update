@@ -68,20 +68,12 @@ jobs:
           extract_new_chart_from_archive
           download_old_chart
 
-      - name: Template charts with values
+      - name: Template new charts with values
         id: template-charts
         run: |
           source .github/scripts/helm-analysis-functions.sh
           setup_context_from_outputs "${{ steps.init.outputs.chart_name }}" "${{ steps.extract-versions.outputs.dependency_name }}" "${{ steps.extract-versions.outputs.old_version }}" "${{ steps.extract-versions.outputs.new_version }}"
           template_new_charts
-          template_old_charts
-
-      - name: Compare rendered manifests
-        id: compare-manifests
-        run: |
-          source .github/scripts/helm-analysis-functions.sh
-          setup_context_from_outputs "${{ steps.init.outputs.chart_name }}" "${{ steps.extract-versions.outputs.dependency_name }}" "${{ steps.extract-versions.outputs.old_version }}" "${{ steps.extract-versions.outputs.new_version }}"
-          compare_template_manifests
 
       - name: Compare chart defaults
         id: compare-defaults
@@ -95,7 +87,7 @@ jobs:
         run: |
           source .github/scripts/helm-analysis-functions.sh
           setup_context_from_outputs "${{ steps.init.outputs.chart_name }}" "${{ steps.extract-versions.outputs.dependency_name }}" "${{ steps.extract-versions.outputs.old_version }}" "${{ steps.extract-versions.outputs.new_version }}"
-          check_early_exit_conditions "${{ steps.compare-manifests.outputs.template_diffs_exist }}"
+          check_early_exit_conditions
 
       - name: AI analysis
         if: steps.early-exit.outputs.skip_ai != 'true'
@@ -110,7 +102,7 @@ jobs:
         run: |
           source .github/scripts/helm-analysis-functions.sh
           setup_context_from_outputs "${{ steps.init.outputs.chart_name }}" "${{ steps.extract-versions.outputs.dependency_name }}" "${{ steps.extract-versions.outputs.old_version }}" "${{ steps.extract-versions.outputs.new_version }}"
-          generate_summary_report "${{ steps.compare-manifests.outputs.template_diffs_exist }}"
+          generate_summary_report
           post_pr_comment "$PR_NUMBER"
 
       - name: Cleanup

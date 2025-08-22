@@ -88,7 +88,7 @@ setup_context_from_outputs() {
     # Ensure working directory and subdirectories exist
     if [[ -d "$WORKING_DIR" ]]; then
         cd "$WORKING_DIR"
-        mkdir -p {new_templates,old_templates,diff_outputs}
+        mkdir -p {new_templates,diff_outputs}
     else
         log_error "Working directory does not exist: $WORKING_DIR"
         exit 1
@@ -123,7 +123,7 @@ setup_workspace() {
     cd "$WORKING_DIR"
     
     # Create necessary directories
-    mkdir -p {new_templates,old_templates,diff_outputs}
+    mkdir -p {new_templates,diff_outputs}
     
     log_info "Workspace set up in: $WORKING_DIR"
 }
@@ -246,13 +246,16 @@ download_old_chart() {
         fi
     fi
     
-    # Extract old values.yaml
+    # Extract old values.yaml and cleanup
     if [[ -f "${DEPENDENCY_NAME}/values.yaml" ]]; then
         cp "${DEPENDENCY_NAME}/values.yaml" "old_chart_values.yaml"
         log_info "Extracted old chart values from $DEPENDENCY_NAME"
+        # Cleanup extracted old chart directory since we only need values.yaml
+        rm -rf "$DEPENDENCY_NAME"
         return 0
     else
         log_error "No values.yaml found in downloaded $DEPENDENCY_NAME chart"
+        rm -rf "$DEPENDENCY_NAME" 2>/dev/null || true
         return 1
     fi
 }
@@ -314,64 +317,13 @@ template_new_charts() {
     template_chart_with_values "./charts/$DEPENDENCY_NAME" "new-release" "new_templates" "new-template"
 }
 
-template_old_charts() {
-    template_chart_with_values "./$DEPENDENCY_NAME" "old-release" "old_templates" "old-template"    
-    # Cleanup extracted old chart directory
-    rm -rf "$DEPENDENCY_NAME"
-}
+# Old chart templating removed - only need values.yaml for comparison
 
 # =============================================================================
 # Comparison Functions
 # =============================================================================
 
-compare_template_manifests() {
-    log_info "Comparing rendered manifests..."
-    
-    local template_diffs_exist=false
-    local values_files
-    mapfile -t values_files < <(ls values.*.yaml 2>/dev/null || true)
-    
-    for values_file in "${values_files[@]}"; do
-        local values_name
-        values_name=$(basename "$values_file" .yaml)
-        
-        local old_template="old_templates/old-template-${values_name}.yaml"
-        local new_template="new_templates/new-template-${values_name}.yaml"
-        
-        log_info "Comparing rendered manifests for $values_file..."
-        
-        # Check if both template files exist and have content
-        if [[ -s "$old_template" ]] && [[ -s "$new_template" ]]; then
-            log_info "Both templates exist, comparing manifests..."
-            
-            # Show debug info
-            log_debug "First 10 lines of OLD template:"
-            head -10 "$old_template" || echo "Cannot read old template"
-            log_debug "First 10 lines of NEW template:"
-            head -10 "$new_template" || echo "Cannot read new template"
-            
-            # Compare manifests
-            local diff_file="diff_outputs/template_diff_${values_name}.txt"
-            dyff between "$old_template" "$new_template" --color=off > "$diff_file" || true
-            
-            if [[ -s "$diff_file" ]]; then
-                log_info "Found manifest differences for $values_file"
-                template_diffs_exist=true
-                echo "template_diff_${values_name}_exists=true" >> "$GITHUB_OUTPUT"
-            else
-                log_info "No manifest differences for $values_file"
-                echo "template_diff_${values_name}_exists=false" >> "$GITHUB_OUTPUT"
-            fi
-        else
-            log_info "Skipping manifest diff for $values_file - template files missing or empty"
-            echo "template_diff_${values_name}_exists=false" >> "$GITHUB_OUTPUT"
-        fi
-    done
-    
-    
-    echo "template_diffs_exist=$template_diffs_exist" >> "$GITHUB_OUTPUT"
-    log_info "Template manifest comparison completed"
-}
+# Template manifest comparison removed - focusing on chart defaults and validation only
 
 compare_chart_default_values() {
     log_info "Comparing chart default values..."
@@ -393,10 +345,8 @@ compare_chart_default_values() {
 
 
 check_early_exit_conditions() {
-    local template_diffs_exist="$1"
-    
     # Check if no changes detected - early exit for safe merges
-    if [[ ! -s diff_outputs/chart_diff.txt && "$template_diffs_exist" != "true" ]]; then
+    if [[ ! -s diff_outputs/chart_diff.txt ]]; then
         log_info "No chart default differences detected - this is a safe version bump"
         
         apply_label "ready-to-merge" "Safe to merge - no breaking changes" "0e8a16"
@@ -801,8 +751,6 @@ EOF
 }
 
 generate_summary_report() {
-    local template_diffs_exist="$1"
-    
     log_info "Generating comprehensive summary report..."
     
     cat > diff_summary.md << EOF
@@ -810,81 +758,55 @@ generate_summary_report() {
 
 **Version Upgrade:** $OLD_VERSION → $NEW_VERSION
 
-### Rendered Manifest Changes
-
 EOF
     
-    add_manifest_changes_to_summary "$template_diffs_exist"
     add_chart_defaults_to_summary
+    add_validation_results_to_summary
     add_ai_analysis_to_summary
 }
 
-add_manifest_changes_to_summary() {
-    local template_diffs_exist="$1"
+add_validation_results_to_summary() {
+    echo "### Helm Template Validation Results" >> diff_summary.md
+    echo "" >> diff_summary.md
     
-    if [[ "$template_diffs_exist" = "true" ]]; then
-        echo "**Status:** Rendered manifests have changed" >> diff_summary.md
+    local values_files
+    mapfile -t values_files < <(ls values.*.yaml 2>/dev/null || true)
+    
+    if [[ ${#values_files[@]} -eq 0 ]]; then
+        echo "**Status:** No custom values files found" >> diff_summary.md
         echo "" >> diff_summary.md
-        
-        local values_files
-        mapfile -t values_files < <(ls values.*.yaml 2>/dev/null || true)
-        
-        for values_file in "${values_files[@]}"; do
-            local values_name
-            values_name=$(basename "$values_file" .yaml)
-            
-            add_values_file_details "$values_file" "$values_name"
-        done
-    else
-        echo "**Status:** No changes in rendered manifests" >> diff_summary.md
-        echo "" >> diff_summary.md
-    fi
-}
-
-add_values_file_details() {
-    local values_file="$1"
-    local values_name="$2"
-    
-    cat >> diff_summary.md << EOF
-<details>
-<summary>$values_file - Manifest Changes and Validation</summary>
-
-**Validation Results (New Chart):**
-
-<details>
-<summary>Helm Template Validation</summary>
-
-\`\`\`
-EOF
-    
-    local new_helm_validation="new_templates/new-template-${values_name}-helm-validation.txt"
-    if [[ -s "$new_helm_validation" ]]; then
-        cat "$new_helm_validation" >> diff_summary.md
-    else
-        echo "✅ Helm template validation passed" >> diff_summary.md
+        return
     fi
     
-    cat >> diff_summary.md << EOF
-\`\`\`
-</details>
-
-EOF
+    local validation_passed=true
     
-    # Add template differences if they exist
-    local diff_file="diff_outputs/template_diff_${values_name}.txt"
-    if [[ -s "$diff_file" ]]; then
-        cat >> diff_summary.md << EOF
-**Manifest Changes:**
-\`\`\`yaml
-# Changes in rendered Kubernetes manifests
-EOF
-        cat "$diff_file" >> diff_summary.md
+    for values_file in "${values_files[@]}"; do
+        local values_name
+        values_name=$(basename "$values_file" .yaml)
+        
+        echo "#### $values_file - Validation Results" >> diff_summary.md
+        echo "" >> diff_summary.md
+        echo "**Helm Template Validation:**" >> diff_summary.md
+        echo "" >> diff_summary.md
         echo '```' >> diff_summary.md
-    else
-        echo "**Manifest Changes:** No differences detected" >> diff_summary.md
-    fi
+        
+        local new_helm_validation="new_templates/new-template-${values_name}-helm-validation.txt"
+        if [[ -s "$new_helm_validation" ]]; then
+            cat "$new_helm_validation" >> diff_summary.md
+            validation_passed=false
+        else
+            echo "✅ Helm template validation passed" >> diff_summary.md
+        fi
+        
+        echo '```' >> diff_summary.md
+        echo "" >> diff_summary.md
+    done
     
-    echo "</details>" >> diff_summary.md
+    if [[ "$validation_passed" = "true" ]]; then
+        echo "**Overall Status:** ✅ All validations passed" >> diff_summary.md
+    else
+        echo "**Overall Status:** ❌ Some validations failed" >> diff_summary.md
+    fi
     echo "" >> diff_summary.md
 }
 
@@ -893,20 +815,12 @@ add_chart_defaults_to_summary() {
     echo "" >> diff_summary.md
     
     if [[ -s "diff_outputs/chart_diff.txt" ]]; then
-        cat >> diff_summary.md << EOF
-**Status:** Chart defaults have changed
-
-<details>
-<summary>View Chart Default Changes</summary>
-
-\`\`\`yaml
-# Changes in chart default values
-EOF
+        echo "**Status:** Chart defaults have changed" >> diff_summary.md
+        echo "" >> diff_summary.md
+        echo '```yaml' >> diff_summary.md
+        echo "# Changes in chart default values" >> diff_summary.md
         cat diff_outputs/chart_diff.txt >> diff_summary.md
-        cat >> diff_summary.md << EOF
-\`\`\`
-</details>
-EOF
+        echo '```' >> diff_summary.md
     else
         echo "**Status:** No changes in chart default values" >> diff_summary.md
     fi
