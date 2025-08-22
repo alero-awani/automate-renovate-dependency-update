@@ -1,0 +1,11 @@
+---
+apiVersion: v2
+name: vault-injector
+version: 1.0.0
+maintainers:
+  - name: Alero Awani
+    email: aleroawani18@gmail.com
+dependencies:
+  - name: vault
+    version: 0.30.0
+    repository: https://helm.releases.hashicorp.com/

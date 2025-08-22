@@ -1,0 +1,800 @@
+name: Breaking Changes Detection for Helm Updates
+
+on:
+  pull_request:
+    paths:
+      - '**/Chart.yaml'
+
+jobs:
+  analyze-helm-updates:
+    if: github.event_name == 'pull_request' && (contains(github.head_ref, 'renovate/') || contains(github.actor, 'renovate') || github.actor == 'renovate[bot]' || contains(github.event.pull_request.title, 'chore(deps)'))
+
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      models: read
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+
+
+      - name: Install dyff, yq
+        run: |
+          # Install dyff
+          DYFF_VERSION="1.8.0"
+          curl -sSL "https://github.com/homeport/dyff/releases/download/v${DYFF_VERSION}/dyff_${DYFF_VERSION}_linux_amd64.tar.gz" | tar -xz
+          sudo mv dyff /usr/local/bin/
+          sudo chmod +x /usr/local/bin/dyff
+          
+          # Install yq
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          
+          # Verify installations (jq is pre-installed on GitHub runners)
+          dyff version
+          yq --version
+          jq --version
+
+
+      - name: Detect changed chart and extract archive of new version
+        id: chart-info
+        run: |
+          echo "Detecting changed chart from PR files..."
+          CHANGED_CHARTS=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} | grep "k8s/charts/" | cut -d'/' -f3 | sort -u)
+          echo "Changed charts detected: $CHANGED_CHARTS"
+          CHART_NAME=$(echo "$CHANGED_CHARTS" | head -1)
+          if [ -z "$CHART_NAME" ]; then
+            echo "No chart changes detected.."
+            exit 1
+          fi
+          echo "Processing chart: $CHART_NAME"
+          echo "chart_name=$CHART_NAME" >> $GITHUB_OUTPUT
+          
+          # Navigate to the chart's charts directory
+          cd "k8s/charts/$CHART_NAME/charts"
+          
+          # Detect which specific dependency changed by comparing old vs new Chart.yaml
+          echo "Detecting which dependency actually changed..."
+          
+          # Get old Chart.yaml content
+          git show ${{ github.event.pull_request.base.sha }}:k8s/charts/$CHART_NAME/Chart.yaml > ../old_chart.yaml
+          
+          # Find which dependency version changed
+          DEPENDENCY_NAME=""
+          for dep in $(yq eval '.dependencies[].name' ../Chart.yaml); do
+            OLD_VER=$(yq eval ".dependencies[] | select(.name == \"$dep\") | .version" ../old_chart.yaml 2>/dev/null || echo "")
+            NEW_VER=$(yq eval ".dependencies[] | select(.name == \"$dep\") | .version" ../Chart.yaml 2>/dev/null || echo "")
+            echo "Checking $dep: $OLD_VER → $NEW_VER"
+            
+            if [ "$OLD_VER" != "$NEW_VER" ] && [ -n "$NEW_VER" ]; then
+              DEPENDENCY_NAME="$dep"
+              echo "Found changed dependency: $dep ($OLD_VER → $NEW_VER)"
+              break
+            fi
+          done
+          
+          # Fallback to first dependency if no change detected
+          if [ -z "$DEPENDENCY_NAME" ]; then
+            DEPENDENCY_NAME=$(yq eval '.dependencies[0].name' ../Chart.yaml)
+            echo "No version changes detected, using first dependency: $DEPENDENCY_NAME"
+          fi
+          
+          echo "Using dependency name: $DEPENDENCY_NAME"
+          echo "dependency_name=$DEPENDENCY_NAME" >> $GITHUB_OUTPUT
+          
+          # Find chart archive (pattern: dependency-name-*.tgz)
+          CHART_ARCHIVE=$(ls ${DEPENDENCY_NAME}-*.tgz 2>/dev/null | head -1)
+          
+          # Fallback: if not found, try with chart directory name
+          if [ -z "$CHART_ARCHIVE" ]; then
+            echo "Archive not found with dependency name, trying chart directory name..."
+            CHART_ARCHIVE=$(ls ${CHART_NAME}-*.tgz 2>/dev/null | head -1)
+          fi
+          
+          if [ -z "$CHART_ARCHIVE" ]; then
+            echo "No chart archive found for $CHART_NAME"
+            exit 1
+          fi
+          
+          echo "Found chart archive: $CHART_ARCHIVE"
+          echo "chart_archive=$CHART_ARCHIVE" >> $GITHUB_OUTPUT
+          
+          # Extract version from filename (pattern: dependency-name-version.tgz)
+          VERSION=$(echo $CHART_ARCHIVE | sed "s/${DEPENDENCY_NAME}-\(.*\)\.tgz/\1/")
+          echo "Chart version: $VERSION"
+          echo "chart_version=$VERSION" >> $GITHUB_OUTPUT
+          
+          # Extract chart archive
+          tar -xzf $CHART_ARCHIVE
+          
+          # Get the default values from the new chart
+          if [ -f "${DEPENDENCY_NAME}/values.yaml" ]; then
+            cp "${DEPENDENCY_NAME}/values.yaml" "../chart_default_values.yaml"
+            echo "Extracted default values from new $DEPENDENCY_NAME chart"
+          else
+            echo "No values.yaml found in $DEPENDENCY_NAME chart archive"
+            exit 1
+          fi
+          
+          # Template new chart with all custom values files
+          echo "Templating new chart with custom values files..."
+          cd ..
+          mkdir -p new_templates
+          
+          for VALUES_FILE in $(ls values.*.yaml 2>/dev/null); do
+            VALUES_NAME=$(basename "$VALUES_FILE" .yaml)
+            echo "Templating new chart with $VALUES_FILE..."
+            helm template new-release "./charts/$DEPENDENCY_NAME" -f "$VALUES_FILE" > "new_templates/new-template-$VALUES_NAME.yaml" 2> "new_templates/new-template-$VALUES_NAME-validation.txt" || true
+            TEMPLATE_RESULT=${PIPESTATUS[0]}
+            
+            
+            echo "Helm template exit code: $TEMPLATE_RESULT"
+            if [ $TEMPLATE_RESULT -eq 0 ]; then
+              echo "Successfully templated new chart with $VALUES_FILE"
+              echo "new_template_${VALUES_NAME}=new_templates/new-template-$VALUES_NAME.yaml" >> $GITHUB_OUTPUT
+              echo "new_template_${VALUES_NAME}_validation=passed" >> $GITHUB_OUTPUT
+            else
+              echo "Failed to template new chart with $VALUES_FILE"
+              echo "new_template_${VALUES_NAME}_validation=failed" >> $GITHUB_OUTPUT
+            fi
+            
+            echo "Helm template results for new $VALUES_FILE:"
+            echo "--- START VALIDATION OUTPUT ---"
+            if [ -s "new_templates/new-template-$VALUES_NAME-validation.txt" ]; then
+              cat "new_templates/new-template-$VALUES_NAME-validation.txt"
+            else
+              echo "No validation error output"
+            fi
+            echo "--- END VALIDATION OUTPUT ---"
+            
+            echo "Debug: Template file size: $(wc -l < "new_templates/new-template-$VALUES_NAME.yaml") lines"
+          done
+
+      - name: Get old chart values for comparison
+        id: get-old-values
+        run: |
+          CHART_NAME="${{ steps.chart-info.outputs.chart_name }}"
+          DEPENDENCY_NAME="${{ steps.chart-info.outputs.dependency_name }}"
+          cd "k8s/charts/$CHART_NAME"
+          
+          echo "Using detected dependency name: $DEPENDENCY_NAME"
+          
+          # Get the OLD version from the base branch (before Renovate's changes)
+          OLD_VERSION=$(git show ${{ github.event.pull_request.base.sha }}:k8s/charts/$CHART_NAME/Chart.yaml | yq eval ".dependencies[] | select(.name == \"$DEPENDENCY_NAME\") | .version")
+          echo "Old chart version (from base branch): $OLD_VERSION"
+          echo "old_version=$OLD_VERSION" >> $GITHUB_OUTPUT
+          
+          # Get the NEW version from the current PR branch
+          NEW_VERSION=$(yq eval ".dependencies[] | select(.name == \"$DEPENDENCY_NAME\") | .version" Chart.yaml)
+          echo "New chart version (from PR branch): $NEW_VERSION"
+          
+          # Download old chart archive using helm
+          echo "Downloading old chart archive for $DEPENDENCY_NAME version $OLD_VERSION..."
+          
+          # Get repository from Chart.yaml
+          REPOSITORY=$(yq eval ".dependencies[] | select(.name == \"$DEPENDENCY_NAME\") | .repository" Chart.yaml)
+          echo "Chart repository: $REPOSITORY"
+          
+          if [[ "$REPOSITORY" == oci://* ]]; then
+            # OCI repository - direct pull
+            echo "Downloading from OCI repository: $REPOSITORY"
+            helm pull "$REPOSITORY/$DEPENDENCY_NAME" --version $OLD_VERSION --untar
+          else
+            # Regular Helm repository  
+            echo "Downloading from Helm repository: $REPOSITORY"
+            helm repo add temp-old-repo "$REPOSITORY"
+            helm pull temp-old-repo/$DEPENDENCY_NAME --version $OLD_VERSION --untar
+            helm repo remove temp-old-repo
+          fi
+          
+          # Extract old values.yaml
+          if [ -f "${DEPENDENCY_NAME}/values.yaml" ]; then
+            cp "${DEPENDENCY_NAME}/values.yaml" "old_chart_values.yaml"
+            echo "Extracted old chart values from $DEPENDENCY_NAME archive"
+          else
+            echo "No values.yaml found in old $DEPENDENCY_NAME chart archive"
+            exit 1
+          fi
+          
+          # Template old chart with all custom values files before cleanup
+          echo "Templating old chart with custom values files..."
+          mkdir -p old_templates
+          
+          for VALUES_FILE in $(ls values.*.yaml 2>/dev/null); do
+            VALUES_NAME=$(basename "$VALUES_FILE" .yaml)
+            echo "Templating old chart with $VALUES_FILE..."
+            helm template old-release "./$DEPENDENCY_NAME" -f "$VALUES_FILE" > "old_templates/old-template-$VALUES_NAME.yaml" 2> "old_templates/old-template-$VALUES_NAME-validation.txt" || true
+            TEMPLATE_RESULT=${PIPESTATUS[0]}
+            
+            
+            echo "Helm template exit code: $TEMPLATE_RESULT"
+            if [ $TEMPLATE_RESULT -eq 0 ]; then
+              echo "Successfully templated old chart with $VALUES_FILE"
+              echo "old_template_${VALUES_NAME}=old_templates/old-template-$VALUES_NAME.yaml" >> $GITHUB_OUTPUT
+              echo "old_template_${VALUES_NAME}_validation=passed" >> $GITHUB_OUTPUT
+            else
+              echo "Failed to template old chart with $VALUES_FILE"
+              echo "old_template_${VALUES_NAME}_failed=true" >> $GITHUB_OUTPUT
+              echo "old_template_${VALUES_NAME}_validation=failed" >> $GITHUB_OUTPUT
+            fi
+            
+            echo "Helm template results for old $VALUES_FILE:"
+            echo "--- START VALIDATION OUTPUT ---"
+            if [ -s "old_templates/old-template-$VALUES_NAME-validation.txt" ]; then
+              cat "old_templates/old-template-$VALUES_NAME-validation.txt"
+            else
+              echo "No validation error output"
+            fi
+            echo "--- END VALIDATION OUTPUT ---"
+          done
+          
+          # Cleanup
+          rm -rf $DEPENDENCY_NAME
+          
+          echo "Old chart values file size: $(wc -c < old_chart_values.yaml) bytes"
+          echo "Old chart values extracted for version $OLD_VERSION"
+
+      - name: Compare rendered manifests from helm templates
+        id: template-comparison
+        run: |
+          CHART_NAME="${{ steps.chart-info.outputs.chart_name }}"
+          cd "k8s/charts/$CHART_NAME"
+          
+          echo "Step 1: Comparing rendered manifests for each values file..."
+          
+          # Create output directory
+          mkdir -p diff_outputs
+          
+          # Compare rendered manifests for each values file
+          TEMPLATE_DIFFS_EXIST=false
+          for VALUES_FILE in $(ls values.*.yaml 2>/dev/null); do
+            VALUES_NAME=$(basename "$VALUES_FILE" .yaml)
+            echo "Comparing rendered manifests for $VALUES_FILE..."
+            
+            OLD_TEMPLATE="old_templates/old-template-$VALUES_NAME.yaml"
+            NEW_TEMPLATE="new_templates/new-template-$VALUES_NAME.yaml"
+            
+            # Check if both template files exist and are not empty
+            if [ -s "$OLD_TEMPLATE" ] && [ -s "$NEW_TEMPLATE" ]; then
+              echo "Both templates exist, checking if they contain valid YAML..."
+              
+              head -10 "$OLD_TEMPLATE" || echo "Cannot read old template"
+              head -10 "$NEW_TEMPLATE" || echo "Cannot read new template"
+              
+              dyff between "$OLD_TEMPLATE" "$NEW_TEMPLATE" --color=off > "diff_outputs/template_diff_$VALUES_NAME.txt" || true
+              
+              if [ -s "diff_outputs/template_diff_$VALUES_NAME.txt" ]; then
+                echo "Found manifest differences for $VALUES_FILE"
+                TEMPLATE_DIFFS_EXIST=true
+                echo "template_diff_${VALUES_NAME}_exists=true" >> $GITHUB_OUTPUT
+              else
+                echo "No manifest differences for $VALUES_FILE"
+                echo "template_diff_${VALUES_NAME}_exists=false" >> $GITHUB_OUTPUT
+              fi
+            else
+              echo "Skipping manifest diff for $VALUES_FILE - template files missing or empty"
+              echo "template_diff_${VALUES_NAME}_exists=false" >> $GITHUB_OUTPUT
+            fi
+          done
+          
+          echo "template_diffs_exist=$TEMPLATE_DIFFS_EXIST" >> $GITHUB_OUTPUT
+          echo "Template manifest comparison completed"
+
+      - name: Compare old and new chart default values
+        id: chart-comparison
+        run: |
+          CHART_NAME="${{ steps.chart-info.outputs.chart_name }}"
+          cd "k8s/charts/$CHART_NAME"
+          
+          echo "Step 2: Comparing old $CHART_NAME chart defaults vs new chart defaults..."
+          
+          # Compare old chart defaults with new chart defaults
+          echo "$CHART_NAME chart version ${{ steps.get-old-values.outputs.old_version }} → ${{ steps.chart-info.outputs.chart_version }}"
+          dyff between old_chart_values.yaml chart_default_values.yaml --color=off > diff_outputs/chart_diff.txt || true
+          
+          # Check if differences exist
+          CHART_HAS_DIFF=$([ -s diff_outputs/chart_diff.txt ] && echo "true" || echo "false")
+          echo "chart_has_diff=$CHART_HAS_DIFF" >> $GITHUB_OUTPUT
+          
+          echo "$CHART_NAME chart defaults comparison completed"
+
+      - name: Check for early exit conditions
+        env:
+          GH_TOKEN: ${{ secrets.PR_AGENT_PAT }}
+        run: |
+          CHART_NAME="${{ steps.chart-info.outputs.chart_name }}"
+          cd "k8s/charts/$CHART_NAME"
+          
+          # Check for template failures (API errors)
+          TEMPLATE_FAILURES=$(find new_templates old_templates -name "*-validation.txt" -size +0c 2>/dev/null | wc -l || echo "0")
+          if [ "$TEMPLATE_FAILURES" -gt 0 ]; then
+            echo "Template failures detected - adding needs-review label and skipping AI analysis..."
+            
+            # Remove any existing analysis labels to avoid conflicts
+            echo "Removing any existing analysis labels..."
+            gh pr edit --remove-label "breaking-changes" 2>/dev/null || true
+            gh pr edit --remove-label "ready-to-merge" 2>/dev/null || true
+            
+            # Create and add needs-review label
+            gh label create "needs-review" --color "fbca04" --description "Template failures detected - requires manual review" 2>/dev/null || true
+            gh pr edit --add-label "needs-review"
+            
+            # Create a summary for template failures
+            cat > diff_summary.md << EOF
+          ## ${{ steps.chart-info.outputs.dependency_name }} Chart Version Upgrade Analysis
+          
+          **Version Upgrade:** ${{ steps.get-old-values.outputs.old_version }} → ${{ steps.chart-info.outputs.chart_version }}
+          
+          ### Template Failures Detected
+          
+          **Status:** Helm template rendering failed for one or more values files
+          
+          ### AI Analysis
+          
+          **Result:** **NEEDS MANUAL REVIEW**
+          
+          Template rendering failures were detected, indicating potential compatibility issues with your values files and the new chart version. Please review the template errors and update your configurations accordingly.
+          
+          **Label Applied:** \`needs-review\`
+          EOF
+            
+            # Post the summary comment
+            gh pr comment ${{ github.event.number }} --body-file diff_summary.md
+            
+            echo "needs-review label applied due to template failures. Skipping AI analysis."
+            echo "skip_ai=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Check if there are no chart differences AND no template differences
+          TEMPLATE_DIFFS_EXIST="${{ steps.template-comparison.outputs.template_diffs_exist }}"
+          if [ ! -s diff_outputs/chart_diff.txt ] && [ "$TEMPLATE_DIFFS_EXIST" != "true" ]; then
+            echo "No chart default differences detected - this is a safe version bump"
+            echo "Adding ready-to-merge label and skipping AI analysis..."
+            
+            # Remove any existing analysis labels to avoid conflicts
+            echo "Removing any existing analysis labels..."
+            gh pr edit --remove-label "breaking-changes" 2>/dev/null || true
+            gh pr edit --remove-label "needs-review" 2>/dev/null || true
+            
+            # Create and add ready-to-merge label
+            gh label create "ready-to-merge" --color "0e8a16" --description "Safe to merge - no breaking changes" 2>/dev/null || true
+            gh pr edit --add-label "ready-to-merge"
+            
+            # Create a simple summary without AI analysis
+            cat > diff_summary.md << EOF
+          ## ${{ steps.chart-info.outputs.dependency_name }} Chart Version Upgrade Analysis
+          
+          **Version Upgrade:** ${{ steps.get-old-values.outputs.old_version }} → ${{ steps.chart-info.outputs.chart_version }}
+          
+          ### Chart Default Values Changes
+          
+          **Status:** No changes in chart default values
+          
+          ### AI Analysis
+          
+          **Result:** **SAFE TO MERGE**
+          
+          No changes detected in chart default values, indicating this is a safe version bump with no breaking changes. This update can be automatically merged.
+          
+          **Label Applied:** \`ready-to-merge\`
+          EOF
+            
+            # Post the summary comment
+            gh pr comment ${{ github.event.number }} --body-file diff_summary.md
+            
+            echo "Ready-to-merge label applied. Skipping AI analysis."
+            echo "skip_ai=true" >> $GITHUB_OUTPUT
+            exit 0
+          else
+            echo "Chart differences detected - proceeding with AI analysis"
+            echo "skip_ai=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: AI Analysis of Changes
+        if: steps.early-exit-check.outputs.skip_ai != 'true'
+        id: ai-analysis
+        env:
+          GH_TOKEN: ${{ secrets.PR_AGENT_PAT }}
+        run: |
+          CHART_NAME="${{ steps.chart-info.outputs.chart_name }}"
+          DEPENDENCY_NAME="${{ steps.chart-info.outputs.dependency_name }}"
+          cd "k8s/charts/$CHART_NAME"
+          
+          echo "Step 3: AI analyzing $CHART_NAME chart value changes vs custom values..."
+          
+          # Create the AI prompt by building it piece by piece
+          cat > full_prompt.txt << EOF
+          You are a Helm chart upgrade expert. Analyze the following:
+
+          IMPORTANT: This analysis is for the '$DEPENDENCY_NAME' dependency within the '$CHART_NAME' chart.
+          Only focus on configurations related to '$DEPENDENCY_NAME' - ignore any other dependencies in the values files.
+
+          1. CHART CHANGES (dyff output between old and new '$DEPENDENCY_NAME' chart default values):
+          \`\`\`
+          EOF
+          
+          # Add chart diff content safely
+          if [ -f "diff_outputs/chart_diff.txt" ] && [ -s "diff_outputs/chart_diff.txt" ]; then
+            cat diff_outputs/chart_diff.txt >> full_prompt.txt
+          else
+            echo "No changes detected in chart default values" >> full_prompt.txt
+          fi
+          
+          cat >> full_prompt.txt << EOF
+          \`\`\`
+
+          2. CUSTOM VALUES FILES (focus only on '$DEPENDENCY_NAME' configurations):
+          \`\`\`yaml
+          EOF
+          
+          # Find and add all custom values files (only for this specific chart)
+          echo "Looking for values files in chart directory: $(pwd)"
+          VALUES_FILES=$(ls values.*.yaml 2>/dev/null)  # Process all values files
+          
+          if [ -z "$VALUES_FILES" ]; then
+            echo "No custom values files found for $CHART_NAME chart in $(pwd)"
+            echo "# No custom values files found" >> full_prompt.txt
+          else
+            echo "Found custom values files for $CHART_NAME chart: $VALUES_FILES"
+            COUNTER=2
+            for VALUES_FILE in $VALUES_FILES; do
+              echo "Processing $CHART_NAME values file: $VALUES_FILE (analyzing $DEPENDENCY_NAME sections)"
+              
+              # Check if this values file contains the dependency we're analyzing
+              if [ -f "$VALUES_FILE" ]; then
+                HAS_DEPENDENCY=$(yq eval "has(\"$DEPENDENCY_NAME\")" "$VALUES_FILE" 2>/dev/null || echo "false")
+                
+                if [ "$HAS_DEPENDENCY" = "true" ]; then
+                  echo "" >> full_prompt.txt
+                  echo "$COUNTER. CUSTOM VALUES FILE ($VALUES_FILE) - $DEPENDENCY_NAME section:" >> full_prompt.txt
+                  echo '```yaml' >> full_prompt.txt
+                  echo "# Only showing $DEPENDENCY_NAME related configurations:" >> full_prompt.txt
+                  yq eval ".$DEPENDENCY_NAME" "$VALUES_FILE" >> full_prompt.txt 2>/dev/null || echo "# No $DEPENDENCY_NAME section found" >> full_prompt.txt
+                  echo '```' >> full_prompt.txt
+                else
+                  echo "" >> full_prompt.txt
+                  echo "$COUNTER. CUSTOM VALUES FILE ($VALUES_FILE):" >> full_prompt.txt
+                  echo '```yaml' >> full_prompt.txt
+                  echo "# No $DEPENDENCY_NAME configurations found in this file" >> full_prompt.txt
+                  echo "# This values file does not contain configurations for the changed dependency ($DEPENDENCY_NAME)" >> full_prompt.txt
+                  echo '```' >> full_prompt.txt
+                fi
+              else
+                echo "" >> full_prompt.txt
+                echo "$COUNTER. CUSTOM VALUES FILE ($VALUES_FILE):" >> full_prompt.txt
+                echo '```yaml' >> full_prompt.txt
+                echo "# File not found: $VALUES_FILE" >> full_prompt.txt
+                echo '```' >> full_prompt.txt
+              fi
+              COUNTER=$((COUNTER + 1))
+            done
+          fi
+          
+          cat >> full_prompt.txt << 'EOF'
+          ```
+
+          TASK: Analyze the '$DEPENDENCY_NAME' chart upgrade impact by examining chart default changes and custom value overrides.
+
+          Perform analysis focusing on:
+          1. VALUES ANALYSIS: Check if custom value overrides are affected by chart changes
+          2. COMPATIBILITY: Determine if existing configurations will work with the new chart version
+          
+          For value overrides, identify:
+          - Specific configuration paths within '$DEPENDENCY_NAME'
+          - What changed in the '$DEPENDENCY_NAME' chart defaults
+          - Impact level (BREAKING, WARNING, INFO)
+          - Recommended actions
+          
+          IGNORE any configurations not related to '$DEPENDENCY_NAME' - they are not relevant to this analysis.
+
+          Format your response as:
+          ## AI Analysis Results
+
+          ### Impact Summary
+          - BREAKING: X issues found
+          - WARNING: Y issues found  
+          - INFO: Z issues found
+
+          ### Chart Changes Analysis
+          [Analyze what changed in the chart defaults and how it affects custom configurations]
+
+          ### Values Configuration Analysis
+          [Analyze custom value overrides and their compatibility with chart changes]
+
+          EOF
+          
+          cat >> full_prompt.txt << 'EOF'
+
+          ### Recommendations
+          [Overall recommendations for this upgrade]
+
+          ### Changes Made
+          [Explain what changes were made to the values files and why]
+
+          ### Final Decision
+          Based on the analysis above, provide one of these labels:
+          - LABEL: breaking-changes (if there are breaking changes that require manual intervention)
+          - LABEL: ready-to-merge (if changes are safe and can be automatically merged)
+          - LABEL: needs-review (if uncertain or requires manual verification)
+          EOF
+          
+          # Create JSON payload safely
+          cat > ai_payload.json << 'EOF'
+          {
+            "model": "gpt-4o",
+            "messages": [
+              {
+                "role": "user",
+                "content": ""
+              }
+            ]
+          }
+          EOF
+          
+          # Insert the prompt content into JSON safely using jq
+          jq --rawfile content full_prompt.txt '.messages[0].content = $content' ai_payload.json > final_payload.json
+          
+          # Debug: Show what we're sending
+          echo "Debug: Checking payload size..."
+          wc -c final_payload.json
+          echo "Debug: First 500 chars of payload:"
+          head -c 500 final_payload.json
+          
+          # Call GitHub AI model with retry logic for rate limits
+          echo "Calling GitHub AI model..."
+          
+          MAX_RETRIES=3
+          RETRY_COUNT=0
+          SUCCESS=false
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$SUCCESS" = false ]; do
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            echo "Attempt $RETRY_COUNT of $MAX_RETRIES..."
+            
+            HTTP_STATUS=$(curl -w "%{http_code}" -X POST \
+              -H "Authorization: Bearer ${{ secrets.PR_AGENT_PAT }}" \
+              -H "Content-Type: application/json" \
+              -d @final_payload.json \
+              "https://models.github.ai/inference/chat/completions" \
+              -o ai_response.json)
+            
+            echo "HTTP Status: $HTTP_STATUS"
+            
+            if [ "$HTTP_STATUS" = "200" ]; then
+              SUCCESS=true
+              echo "API call successful"
+            elif [ "$HTTP_STATUS" = "429" ]; then
+              if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                WAIT_TIME=$((RETRY_COUNT * 30))
+                echo "Rate limited (429). Waiting $WAIT_TIME seconds before retry..."
+                sleep $WAIT_TIME
+              else
+                echo "Rate limit exceeded after $MAX_RETRIES attempts"
+              fi
+            elif [ "$HTTP_STATUS" = "413" ]; then
+              echo "Payload too large (413). Cannot retry - need to reduce payload size."
+              break
+            else
+              if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                WAIT_TIME=$((RETRY_COUNT * 10))
+                echo "HTTP $HTTP_STATUS error. Waiting $WAIT_TIME seconds before retry..."
+                sleep $WAIT_TIME
+              else
+                echo "API call failed after $MAX_RETRIES attempts with status $HTTP_STATUS"
+              fi
+            fi
+          done
+          echo "Response file size: $(wc -c < ai_response.json) bytes"
+          echo "Response content:"
+          cat ai_response.json
+          
+          # Extract the AI response
+          if [ -f ai_response.json ] && [ -s ai_response.json ]; then
+            # Check if we got a proper response
+            if jq -e '.choices[0].message.content' ai_response.json > /dev/null 2>&1; then
+              AI_ANALYSIS=$(jq -r '.choices[0].message.content' ai_response.json)
+              echo "$AI_ANALYSIS" > ai_analysis.md
+              echo "AI analysis completed successfully"
+              
+              # Extract label from AI response and add to PR (remove conflicting labels first)
+              echo "Removing any existing analysis labels before applying new one..."
+              gh pr edit --remove-label "breaking-changes" 2>/dev/null || true
+              gh pr edit --remove-label "ready-to-merge" 2>/dev/null || true
+              gh pr edit --remove-label "needs-review" 2>/dev/null || true
+              
+              if echo "$AI_ANALYSIS" | grep -qi "LABEL.*breaking-changes\|Label.*breaking-changes"; then
+                echo "AI detected breaking changes!"
+                echo "breaking_changes=true" >> $GITHUB_OUTPUT
+                echo "Adding 'breaking-changes' label to PR..."
+                gh label create "breaking-changes" --color "d73a49" --description "Breaking changes detected" || true
+                gh pr edit --add-label "breaking-changes"
+              elif echo "$AI_ANALYSIS" | grep -qi "LABEL.*ready-to-merge\|Label.*ready-to-merge"; then
+                echo "AI detected no breaking changes - safe to merge"
+                echo "breaking_changes=false" >> $GITHUB_OUTPUT
+                echo "Adding 'ready-to-merge' label to PR..."
+                gh label create "ready-to-merge" --color "0e8a16" --description "Safe to merge" || true
+                gh pr edit --add-label "ready-to-merge"
+              else
+                echo "AI recommends manual review"
+                echo "breaking_changes=unknown" >> $GITHUB_OUTPUT
+                echo "Adding 'needs-review' label to PR..."
+                gh label create "needs-review" --color "fbca04" --description "Requires manual review" || true
+                gh pr edit --add-label "needs-review"
+              fi
+            else
+              echo "AI response format invalid - adding needs-review label"
+              echo "## AI Analysis" > ai_analysis.md
+              echo "" >> ai_analysis.md
+              echo "AI analysis failed with HTTP status: $HTTP_STATUS" >> ai_analysis.md
+              echo "" >> ai_analysis.md
+              echo "<details>" >> ai_analysis.md
+              echo "<summary>API Response</summary>" >> ai_analysis.md
+              echo "" >> ai_analysis.md
+              echo '```json' >> ai_analysis.md
+              cat ai_response.json >> ai_analysis.md
+              echo '```' >> ai_analysis.md
+              echo "</details>" >> ai_analysis.md
+              
+              # Add needs-review label for AI API errors
+              echo "Removing any existing analysis labels..."
+              gh pr edit --remove-label "breaking-changes" 2>/dev/null || true
+              gh pr edit --remove-label "ready-to-merge" 2>/dev/null || true
+              
+              echo "Adding 'needs-review' label due to AI API error..."
+              gh label create "needs-review" --color "fbca04" --description "AI analysis failed - requires manual review" || true
+              gh pr edit --add-label "needs-review"
+            fi
+          else
+            echo "AI analysis failed - no response file - adding needs-review label"
+            echo "## AI Analysis" > ai_analysis.md
+            echo "" >> ai_analysis.md
+            echo "AI analysis could not be completed. HTTP status: $HTTP_STATUS" >> ai_analysis.md
+            
+            # Add needs-review label for AI API errors
+            echo "Removing any existing analysis labels..."
+            gh pr edit --remove-label "breaking-changes" 2>/dev/null || true
+            gh pr edit --remove-label "ready-to-merge" 2>/dev/null || true
+            
+            echo "Adding 'needs-review' label due to AI API failure..."
+            gh label create "needs-review" --color "fbca04" --description "AI analysis failed - requires manual review" || true
+            gh pr edit --add-label "needs-review"
+          fi
+
+      - name: Create diff summary
+        if: steps.early-exit-check.outputs.skip_ai != 'true'
+        id: diff-summary  
+        run: |
+          CHART_NAME="${{ steps.chart-info.outputs.chart_name }}"
+          cd "k8s/charts/$CHART_NAME"
+          
+          # Create comprehensive summary with template diffs, chart diff and AI analysis
+          cat > diff_summary.md << EOF
+          ## ${{ steps.chart-info.outputs.dependency_name }} Chart Version Upgrade Analysis
+          
+          **Version Upgrade:** ${{ steps.get-old-values.outputs.old_version }} → ${{ steps.chart-info.outputs.chart_version }}
+          
+          ### Rendered Manifest Changes
+          
+          EOF
+          
+          # Add template diffs for each values file
+          TEMPLATE_DIFFS_EXIST="${{ steps.template-comparison.outputs.template_diffs_exist }}"
+          if [ "$TEMPLATE_DIFFS_EXIST" = "true" ]; then
+            echo "**Status:** Rendered manifests have changed" >> diff_summary.md
+            echo "" >> diff_summary.md
+            
+            for VALUES_FILE in $(ls values.*.yaml 2>/dev/null); do
+              VALUES_NAME=$(basename "$VALUES_FILE" .yaml)
+              
+              # Add validation status
+              echo "<details>" >> diff_summary.md
+              echo "<summary>$VALUES_FILE - Manifest Changes and Validation</summary>" >> diff_summary.md
+              echo "" >> diff_summary.md
+              
+              # Show validation results from files
+              echo "**Helm Template Results:**" >> diff_summary.md
+              echo "" >> diff_summary.md
+              
+              echo "<details>" >> diff_summary.md
+              echo "<summary>Old Chart Template Results</summary>" >> diff_summary.md
+              echo "" >> diff_summary.md
+              echo '```' >> diff_summary.md
+              if [ -f "old_templates/old-template-$VALUES_NAME-validation.txt" ] && [ -s "old_templates/old-template-$VALUES_NAME-validation.txt" ]; then
+                cat "old_templates/old-template-$VALUES_NAME-validation.txt" >> diff_summary.md
+              else
+                echo "No validation errors - chart templated successfully" >> diff_summary.md
+              fi
+              echo '```' >> diff_summary.md
+              echo "</details>" >> diff_summary.md
+              echo "" >> diff_summary.md
+              
+              echo "<details>" >> diff_summary.md
+              echo "<summary>New Chart Template Results</summary>" >> diff_summary.md
+              echo "" >> diff_summary.md
+              echo '```' >> diff_summary.md
+              if [ -f "new_templates/new-template-$VALUES_NAME-validation.txt" ] && [ -s "new_templates/new-template-$VALUES_NAME-validation.txt" ]; then
+                cat "new_templates/new-template-$VALUES_NAME-validation.txt" >> diff_summary.md
+              else
+                echo "No validation errors - chart templated successfully" >> diff_summary.md
+              fi
+              echo '```' >> diff_summary.md
+              echo "</details>" >> diff_summary.md
+              echo "" >> diff_summary.md
+              
+              # Show template differences if they exist
+              if [ -f "diff_outputs/template_diff_$VALUES_NAME.txt" ] && [ -s "diff_outputs/template_diff_$VALUES_NAME.txt" ]; then
+                echo "**Manifest Changes:**" >> diff_summary.md
+                echo '```yaml' >> diff_summary.md
+                echo "# Changes in rendered Kubernetes manifests" >> diff_summary.md
+                cat "diff_outputs/template_diff_$VALUES_NAME.txt" >> diff_summary.md
+                echo '```' >> diff_summary.md
+              else
+                echo "**Manifest Changes:** No differences detected" >> diff_summary.md
+              fi
+              
+              echo "</details>" >> diff_summary.md
+              echo "" >> diff_summary.md
+            done
+          else
+            echo "**Status:** No changes in rendered manifests" >> diff_summary.md
+            echo "" >> diff_summary.md
+          fi
+          
+          echo "### Chart Default Values Changes" >> diff_summary.md
+          echo "" >> diff_summary.md
+          
+          if [ -f "diff_outputs/chart_diff.txt" ] && [ -s "diff_outputs/chart_diff.txt" ]; then
+            echo "**Status:** Chart defaults have changed" >> diff_summary.md
+            echo "" >> diff_summary.md
+            echo "<details>" >> diff_summary.md
+            echo "<summary>View Chart Default Changes</summary>" >> diff_summary.md
+            echo "" >> diff_summary.md
+            echo '```yaml' >> diff_summary.md
+            echo "# Changes in chart default values" >> diff_summary.md
+            cat diff_outputs/chart_diff.txt >> diff_summary.md
+            echo '```' >> diff_summary.md
+            echo "</details>" >> diff_summary.md
+          else
+            echo "**Status:** No changes in chart default values" >> diff_summary.md
+          fi
+          
+          echo "" >> diff_summary.md
+          
+          # Add AI analysis section
+          if [ -f "ai_analysis.md" ]; then
+            cat ai_analysis.md >> diff_summary.md
+          else
+            echo "## AI Analysis" >> diff_summary.md
+            echo "" >> diff_summary.md  
+            echo "AI analysis was not available for this run." >> diff_summary.md
+          fi
+
+      - name: Post diff comment
+        if: steps.early-exit-check.outputs.skip_ai != 'true'
+        run: |
+          CHART_NAME="${{ steps.chart-info.outputs.chart_name }}"
+          cd "k8s/charts/$CHART_NAME"
+          gh pr comment ${{ github.event.number }} --body-file diff_summary.md
+        env:
+          GH_TOKEN: ${{ secrets.PR_AGENT_PAT }}
+
+
+      - name: Summary
+        run: |
+          CHART_NAME="${{ steps.chart-info.outputs.chart_name }}"
+          echo "=========================================="
+          echo "${CHART_NAME^^} CHART UPGRADE ANALYSIS SUMMARY"
+          echo "=========================================="
+          echo "Old version: ${{ steps.get-old-values.outputs.old_version }}"
+          echo "New version: ${{ steps.chart-info.outputs.chart_version }}"
+          echo "Chart defaults changed: ${{ steps.chart-comparison.outputs.chart_has_diff }}"
+          echo "Breaking changes detected: ${{ steps.ai-analysis.outputs.breaking_changes }}"
+          echo ""
+          echo "AI analysis and auto-labeling complete!"
+          echo "Check the PR comment for detailed analysis results."
+          echo "PR has been automatically labeled based on AI assessment."

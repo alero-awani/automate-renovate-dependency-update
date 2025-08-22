@@ -1,0 +1,79 @@
+kyverno:
+  backgroundController:
+    replicas: 3
+
+    # Add additional RBAC permissions for the background controller
+    rbac:
+      clusterRole:
+        extraResources:
+          # Permission to manage Roles and RoleBindings with full permissions
+          - apiGroups: ["rbac.authorization.k8s.io"]
+            resources: ["roles", "rolebindings"]
+            verbs: ["*"]
+
+          # Wildcard permissions that allow creating roles with any permission
+          - apiGroups: ["*"]
+            resources: ["*"]
+            verbs: ["*"]
+
+          # Original permissions below (keeping for reference)
+          - apiGroups: [""]
+            resources: ["pods", "services", "configmaps", "secrets", "deployments", "jobs"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+          - apiGroups: ["apps"]
+            resources: ["deployments", "pods", "services", "configmaps", "secrets", "jobs"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+          - apiGroups: ["batch"]
+            resources: ["jobs", "deployments", "pods", "services", "configmaps", "secrets"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+          - apiGroups: ["extensions"]
+            resources: ["deployments", "pods", "services", "configmaps", "secrets", "jobs"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  admissionController:
+    replicas: 3
+
+    # Add additional RBAC permissions for the admission controller
+    rbac:
+      clusterRole:
+        extraResources:
+          # Permission to validate secret generation rules
+          - apiGroups: [""]
+            resources: ["secrets"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+          - apiGroups: ["secrets.hashicorp.com"]
+            resources: ["vaultstaticsecrets"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  cleanupController:
+    replicas: 3
+
+  reportsController:
+    replicas: 3
+
+    # Add additional RBAC permissions for the reports controller
+    rbac:
+      clusterRole:
+        extraResources:
+          # Permission to list and watch Secrets for reporting
+          - apiGroups: [""]
+            resources: ["secrets"]
+            verbs: ["get", "list", "watch"]
+
+          # Permission to list and watch Roles and RoleBindings for reporting
+          - apiGroups: ["rbac.authorization.k8s.io"]
+            resources: ["roles", "rolebindings"]
+            verbs: ["get", "list", "watch"]
+
+  features:
+    admissionReports:
+      enabled: true
+    aggregateReports:
+      enabled: true
+    policyReports:
+      enabled: true
+  webhookLabels:
+    app.kubernetes.io/managed-by: argocd
