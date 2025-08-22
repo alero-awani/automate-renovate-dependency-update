@@ -1,0 +1,10 @@
+apiVersion: v2
+name: kyverno
+version: 1.0.0
+maintainers:
+- name: Samuel Arogbonlo
+  email: samuel.arogbonlo@p2p.org
+dependencies:
+  - name: kyverno
+    version: "3.5.0"
+    repository: "https://kyverno.github.io/kyverno/"

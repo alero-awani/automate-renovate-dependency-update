@@ -1,0 +1,10 @@
+apiVersion: v2
+name: cilium
+version: 1.0.0
+maintainers:
+  - name: Samuel Arogbonlo
+    email: samuel.arogbonlo@p2p.org
+dependencies:
+  - name: cilium
+    version: "1.18.0"
+    repository: "https://helm.cilium.io/"

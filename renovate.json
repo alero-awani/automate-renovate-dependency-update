@@ -1,0 +1,32 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "baseBranches": ["$default"],
+  "rebaseWhen": "behind-base-branch",
+  "dependencyDashboard": false,
+  "labels": ["dependencies"],
+  "enabledManagers": ["helmv3", "custom.regex"],
+  "ignorePaths": [
+    "k8s/webdev/sendgrid-stats-exporter/**"
+  ],
+  "packageRules": [
+    {
+      "description": "Fix subchart archives for helm chart",
+      "matchManagers": ["helmv3"],
+      "postUpdateOptions": ["helmUpdateSubChartArchives"]
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "fileFormat": "yaml",
+      "managerFilePatterns": [
+        "/values(\\..+)?\\.yaml$/"
+      ],
+      "matchStrings": [
+        "renovate: datasource=(?<datasource>.*?) depName=(?<depName>.*?)( versioning=(?<versioning>.*?))?\\s *tag: (?<currentValue>.*)\\s"
+      ],
+      "datasourceTemplate": "{{{datasource}}}",
+      "versioningTemplate": "{{#if versioning}}{{{versioning}}}{{else}}semver{{/if}}"
+    }
+  ]
+}

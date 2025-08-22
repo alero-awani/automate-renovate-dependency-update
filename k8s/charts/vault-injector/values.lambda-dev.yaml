@@ -1,0 +1,41 @@
+---
+vault:
+  global:
+    externalVaultAddr: https://vault.infra.alero.org
+  injector:
+    # INFO: https://github.com/hashicorp/vault/issues/8767#issuecomment-654906007
+    enabled: true
+    externalVaultAddr: https://vault.infra.alero.org
+    authPath: "lambda/kubernetes/lambda-dev"
+    # Mount Path of the Vault Kubernetes Auth Method.
+    replicas: 3
+    podDisruptionBudget:
+      maxUnavailable: 1
+    webhook:
+      failurePolicy: Fail
+    revokeOnShutdown: true
+    leaderElector:
+      enabled: true
+    resources:
+      limits:
+        cpu: 100m
+        memory: 64Mi
+      requests:
+        cpu: 50m
+        memory: 64Mi
+    agentDefaults:
+      template: "map"
+      logLevel: "info"
+      logFormat: "standard"
+      cpuLimit: "100m"
+      cpuRequest: "50m"
+      memLimit: "64Mi"
+      memRequest: "64Mi"
+  server:
+    enabled: false
+    authDelegator:
+      enabled: false
+    service:
+      enabled: false
+    serviceAccount:
+      create: false

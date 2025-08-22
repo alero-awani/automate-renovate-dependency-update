@@ -1,0 +1,7 @@
+---
+apiVersion: v2
+name: rabbitmq
+version: 1.1.0
+maintainers:
+  - name: Alero Awani
+    email: aleroawani18@gmail.com

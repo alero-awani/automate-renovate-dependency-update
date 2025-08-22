@@ -1,0 +1,15 @@
+---
+apiVersion: v2
+name: cert-manager
+version: 1.0.0
+maintainers:
+  - name: Mikhail Nacharov
+    email: mikhail.nacharov@p2p.org
+dependencies:
+  - name: cert-manager
+    version: v1.18.2
+    repository: https://charts.jetstack.io
+  - name: origin-ca-issuer
+    version: 0.5.12
+    repository: oci://ghcr.io/cloudflare/origin-ca-issuer-charts
+    condition: origin-ca-issuer.enabled
