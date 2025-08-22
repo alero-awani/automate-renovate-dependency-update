@@ -241,9 +241,9 @@ template_chart_with_values() {
         local output_file="${output_dir}/${prefix}-${values_name}.yaml"
         local helm_validation_file="${output_dir}/${prefix}-${values_name}-helm-validation.txt"
         # TESTING: Simulate template validation errors
-        echo "Error: simulated validation failure for testing" > "$helm_validation_file"
-        echo "Error: Invalid resource configuration" >> "$helm_validation_file"
-        echo "Error: Missing required field 'metadata.name'" >> "$helm_validation_file"
+        echo "Error: pods 'cilium-agent' is forbidden: User cannot create resource 'pods' in API group" > "$helm_validation_file"
+        echo "Error: serviceaccounts 'cilium' is forbidden: User cannot create resource 'serviceaccounts'" >> "$helm_validation_file"
+        echo "Error: configmaps 'cilium-config' already exists" >> "$helm_validation_file"
         
         # Template with validation - stderr goes to validation file for AI analysis
         if false; then  # Force failure for testing
@@ -431,9 +431,11 @@ Format your response as:
 [Analyze custom value overrides and their compatibility with chart changes]
 
 ### Helm Template Validation Analysis
-[Analyze any validation errors from helm template validation:
-- Assess if validation errors indicate breaking changes or configuration issues
-- Distinguish between errors that indicate breaking changes vs environment/infrastructure issues
+[CRITICAL: Analyze any validation errors from helm template validation:
+- If ANY validation errors exist, this typically indicates compatibility issues
+- Validation failures usually require manual review unless clearly environment-related
+- Chart upgrade with validation errors should rarely be marked as ready-to-merge
+- Distinguish between actual chart compatibility issues vs temporary infrastructure problems
 - Provide specific recommendations for resolving validation issues]
 
 ### Recommendations
@@ -443,7 +445,9 @@ Format your response as:
 Based on the analysis above, provide one of these labels:
 - LABEL: breaking-changes (if there are breaking changes that require manual intervention)
 - LABEL: ready-to-merge (if changes are safe and can be automatically merged)
-- LABEL: needs-review (if uncertain or requires manual verification)
+- LABEL: needs-review (if uncertain, validation errors exist, or requires manual verification)
+
+IMPORTANT: If validation errors were detected, strongly consider "needs-review" or "breaking-changes" unless the errors are clearly environmental/infrastructure issues unrelated to the chart upgrade.
 EOF
 }
 
