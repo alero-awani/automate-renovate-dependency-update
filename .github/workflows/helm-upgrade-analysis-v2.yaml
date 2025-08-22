@@ -1,0 +1,121 @@
+name: Helm Chart Upgrade Analysis (Improved)
+
+on:
+  pull_request:
+    types: [opened]
+    paths:
+      - '**/Chart.yaml'
+
+env:
+  GH_TOKEN: ${{ secrets.PR_AGENT_PAT }}
+  PR_NUMBER: ${{ github.event.number }}
+
+jobs:
+  helm-upgrade-analysis:
+    if: github.actor == 'renovate[bot]' || contains(github.head_ref, 'renovate')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      models: read
+    
+    steps:
+      - name: Debug GitHub context
+        run: |
+          echo "Branch: ${{ github.head_ref }}"
+          echo "Actor: ${{ github.actor }}"
+          echo "PR Title: ${{ github.event.pull_request.title }}"
+          echo "Event action: ${{ github.event.action }}"
+        
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Setup dependencies
+        run: |
+          # Install required tools
+          DYFF_VERSION="1.8.0"
+          curl -sSL "https://github.com/homeport/dyff/releases/download/v${DYFF_VERSION}/dyff_${DYFF_VERSION}_linux_amd64.tar.gz" | tar -xz
+          sudo mv dyff /usr/local/bin/
+          sudo chmod +x /usr/local/bin/dyff
+          
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          
+          # Verify installations
+          dyff version && yq --version && jq --version
+
+      - name: Kind Cluster
+        uses: helm/kind-action@v1.12.0
+
+      - name: Initialize analysis
+        id: init
+        run: |
+          # Source common functions
+          source .github/scripts/helm-analysis-functions.sh
+          
+          # Detect changed chart
+          detect_changed_chart "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
+          
+          # Set up working directory
+          setup_workspace
+
+      - name: Extract dependency versions
+        id: extract-versions
+        run: |
+          source .github/scripts/helm-analysis-functions.sh
+          extract_dependency_versions "${{ github.event.pull_request.base.sha }}" "${{ steps.init.outputs.chart_name }}"
+
+      - name: Extract charts
+        id: extract-charts
+        run: |
+          source .github/scripts/helm-analysis-functions.sh
+          setup_context_from_outputs "${{ steps.init.outputs.chart_name }}" "${{ steps.extract-versions.outputs.dependency_name }}" "${{ steps.extract-versions.outputs.old_version }}" "${{ steps.extract-versions.outputs.new_version }}"
+          extract_new_chart_from_archive
+          get_old_chart_values
+
+      - name: Template new charts with values
+        id: template-charts
+        run: |
+          source .github/scripts/helm-analysis-functions.sh
+          setup_context_from_outputs "${{ steps.init.outputs.chart_name }}" "${{ steps.extract-versions.outputs.dependency_name }}" "${{ steps.extract-versions.outputs.old_version }}" "${{ steps.extract-versions.outputs.new_version }}"
+          template_chart_with_values "./charts/${{ steps.extract-versions.outputs.dependency_name }}" "new-release" "new_templates" "new-template"
+
+      - name: Compare chart defaults
+        id: compare-defaults
+        run: |
+          source .github/scripts/helm-analysis-functions.sh
+          setup_context_from_outputs "${{ steps.init.outputs.chart_name }}" "${{ steps.extract-versions.outputs.dependency_name }}" "${{ steps.extract-versions.outputs.old_version }}" "${{ steps.extract-versions.outputs.new_version }}"
+          compare_chart_default_values
+
+      - name: Check early exit conditions
+        id: early-exit
+        run: |
+          source .github/scripts/helm-analysis-functions.sh
+          setup_context_from_outputs "${{ steps.init.outputs.chart_name }}" "${{ steps.extract-versions.outputs.dependency_name }}" "${{ steps.extract-versions.outputs.old_version }}" "${{ steps.extract-versions.outputs.new_version }}"
+          check_early_exit_conditions
+
+      - name: AI analysis
+        if: steps.early-exit.outputs.skip_ai != 'true'
+        id: ai-analysis
+        run: |
+          source .github/scripts/helm-analysis-functions.sh
+          setup_context_from_outputs "${{ steps.init.outputs.chart_name }}" "${{ steps.extract-versions.outputs.dependency_name }}" "${{ steps.extract-versions.outputs.old_version }}" "${{ steps.extract-versions.outputs.new_version }}"
+          perform_ai_analysis
+
+      - name: Generate summary report
+        if: steps.early-exit.outputs.skip_ai != 'true'
+        run: |
+          source .github/scripts/helm-analysis-functions.sh
+          setup_context_from_outputs "${{ steps.init.outputs.chart_name }}" "${{ steps.extract-versions.outputs.dependency_name }}" "${{ steps.extract-versions.outputs.old_version }}" "${{ steps.extract-versions.outputs.new_version }}"
+          generate_summary_report
+          post_pr_comment "$PR_NUMBER"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          source .github/scripts/helm-analysis-functions.sh
+          cleanup_workspace
+          

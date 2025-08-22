@@ -1,0 +1,70 @@
+# Values file designed to break helm template --validate 
+nginx:
+  # Force invalid Kubernetes manifests
+  image:
+    registry: docker.io
+    repository: bitnami/nginx
+    tag: "1.18.0"
+    pullPolicy: "InvalidPullPolicy"  # This will fail Kubernetes validation
+  
+  # Force invalid service configuration
+  service:
+    type: "InvalidServiceType"  # This will fail - not ClusterIP/NodePort/LoadBalancer
+    ports:
+      - name: "http"
+        port: "not-a-number"  # This will fail - port must be integer
+        protocol: "InvalidProtocol"  # This will fail - must be TCP/UDP/SCTP
+        targetPort: 99999999  # This will fail - port out of range
+
+  # Force invalid ingress that will fail validation
+  ingress:
+    enabled: true
+    className: "nginx"
+    hosts:
+      - host: nginx.example.com
+        paths:
+          - path: /
+            pathType: "InvalidPathType"  # Must be Exact/Prefix/ImplementationSpecific
+            backend:
+              service:
+                name: "nginx"
+                port:
+                  number: "not-a-port"  # Must be integer, not string
+
+  # Force invalid autoscaling
+  autoscaling:
+    enabled: true
+    minReplicas: "not-a-number"  # Must be integer
+    maxReplicas: -5  # Must be positive integer
+    targetCPUUtilizationPercentage: 150  # Must be <= 100
+    
+  # Force invalid resource constraints
+  resources:
+    limits:
+      cpu: "999invalid"  # Invalid CPU format
+      memory: "not-valid-memory"  # Invalid memory format
+    requests:
+      cpu: "10000000m"  # Unrealistic CPU request
+      memory: "999999999999Gi"  # Unrealistic memory
+
+  # Force invalid pod security context
+  podSecurityContext:
+    fsGroup: "not-a-number"  # Must be integer
+    runAsUser: "invalid-user"  # Must be integer
+    
+  # Force invalid security context  
+  securityContext:
+    runAsUser: "root-user"  # Must be integer, not string
+    runAsGroup: "invalid-group"  # Must be integer
+    capabilities:
+      add: ["INVALID_CAPABILITY"]  # Invalid Linux capability
+      
+  # Force invalid probes
+  livenessProbe:
+    httpGet:
+      port: "invalid-port"  # Must be integer or named port
+      path: /health
+    initialDelaySeconds: "not-a-number"  # Must be integer
+    
+  # Force invalid replica count
+  replicaCount: "not-a-number"  # Must be integer

@@ -1,0 +1,61 @@
+replicas: 3
+pdb:
+  minAvailable: 1
+
+# list of namespaces from where it's allowed to reference this cluster (create vhost/user/permissions)
+topologyAllowedNamespaces:
+  - eth-middleware-prod-testnets
+
+virtual_service:
+  enabled: true
+  host: rabbitmq-middleware-prod.dev-p2p.org
+
+override:
+  statefulSet:
+    spec:
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/instance: rabbitmq
+
+persistence:
+  storageClassName: p2p-csi-standard-rwo
+  storage: 5Gi
+
+resources:
+  limits: { cpu: 2, memory: 2Gi }
+  requests: { cpu: 1, memory: 2Gi }
+
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: prod
+          operator: In
+          values:
+          - "true"
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - podAffinityTerm:
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: rabbitmq
+        topologyKey: kubernetes.io/hostname
+      weight: 1
+
+tolerations:
+- key: prod
+  operator: Exists
+
+#! secretBackend uses vault injector
+secretBackend:
+  vault:
+    defaultUserPath: webdev/data/rabbitmq/{{ .Release.Namespace }}/admin
+    role: rabbitmq_cluster
+
+# users can be loaded from vault and created in rabbitmq via this structure:
+vault:
+  auth_backend: gke_webdev
+  role: rabbitmq_allow_users_read
+  kv_mount: webdev
