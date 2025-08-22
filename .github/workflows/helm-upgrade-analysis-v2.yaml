@@ -20,13 +20,6 @@ jobs:
       models: read
     
     steps:
-      - name: Debug GitHub context
-        run: |
-          echo "Branch: ${{ github.head_ref }}"
-          echo "Actor: ${{ github.actor }}"
-          echo "PR Title: ${{ github.event.pull_request.title }}"
-          echo "Event action: ${{ github.event.action }}"
-        
       - name: Checkout PR branch
         uses: actions/checkout@v4
         with:

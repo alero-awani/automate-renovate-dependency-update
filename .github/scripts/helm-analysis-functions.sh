@@ -240,8 +240,13 @@ template_chart_with_values() {
         
         local output_file="${output_dir}/${prefix}-${values_name}.yaml"
         local helm_validation_file="${output_dir}/${prefix}-${values_name}-helm-validation.txt"
+        # TESTING: Simulate template validation errors
+        echo "Error: simulated validation failure for testing" > "$helm_validation_file"
+        echo "Error: Invalid resource configuration" >> "$helm_validation_file"
+        echo "Error: Missing required field 'metadata.name'" >> "$helm_validation_file"
+        
         # Template with validation - stderr goes to validation file for AI analysis
-        if helm template "$release_name" "$chart_path" -f "$values_file" --validate --dry-run=server > "$output_file" 2> "$helm_validation_file"; then
+        if false; then  # Force failure for testing
             log_info "Helm template validation passed for $values_file"
             log_info "Successfully templated chart with $values_file"
         else
