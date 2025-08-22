@@ -868,23 +868,6 @@ EOF
 \`\`\`
 </details>
 
-<details>
-<summary>kubectl Dry-run Validation</summary>
-
-\`\`\`
-EOF
-    
-    local new_kubectl_validation="new_templates/new-template-${values_name}-kubectl-validation.txt"
-    if [[ -s "$new_kubectl_validation" ]]; then
-        cat "$new_kubectl_validation" >> diff_summary.md
-    else
-        echo "✅ kubectl dry-run validation passed" >> diff_summary.md
-    fi
-    
-    cat >> diff_summary.md << EOF
-\`\`\`
-</details>
-
 EOF
     
     # Add template differences if they exist
