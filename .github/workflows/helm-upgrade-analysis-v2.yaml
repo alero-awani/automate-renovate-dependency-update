@@ -7,7 +7,7 @@ on:
       - '**/Chart.yaml'
 
 env:
-  GH_TOKEN: ${{ secrets.PR_AGENT_PAT }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   PR_NUMBER: ${{ github.event.number }}
 
 jobs:
